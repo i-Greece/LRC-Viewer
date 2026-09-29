@@ -23,6 +23,10 @@ jobs:
   build-apk:
     runs-on: ubuntu-latest
 
+    # 没有超时保护时，buildozer 万一卡在交互提示上会一直等到 GitHub 的
+    # 默认上限（360 分钟），白白烧掉额度却什么都没产出。
+    timeout-minutes: 90
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -106,7 +110,112 @@ jobs:
           buildozer android update 2>&1 | tee -a "$RUNNER_TEMP/buildozer.log" \
             || echo "::warning::buildozer android update 返回非 0，日志已记录，交给下一步暴露真正错误"
 
-      # 下完就存，不等构建结果。
+      # ------------------------------------------------------------------
+      # 首次构建就是挂在这里背后的原因上，而且是"秒退"，不是超时：
+      #
+      #   Accept? (y/N): Skipping following packages as the license is not accepted:
+      #   Android SDK Build-Tools 37
+      #   ... build-tools folder not found ...
+      #   Aidl not found, please install it.
+      #
+      # 因果链是：许可证没接受 -> build-tools 整包被跳过 -> 没有 build-tools 目录
+      # -> 找不到里面的 aidl -> buildops.checkbin() 直接 exit(1)。
+      # 根因在 buildozer.spec 的 android.accept_sdk_license（默认 False，已改 True）。
+      #
+      # 这一步是兜底：
+      #   1. 无条件跑一次 `yes | sdkmanager --licenses`（幂等），把许可证全部接受。
+      #      licenses/ 就在 ~/.buildozer 里，会被下面的缓存带走 —— 所以只要成功
+      #      过一次，后面所有构建都不再受这个坑影响。
+      #   2. 复刻 buildozer 的 aidl 判定提前报错。必须复刻而不是简单判断
+      #      "aidl 存在与否"：buildozer 的 _check_aidl() 走 _read_version_subdir()，
+      #      **只看目录名最大的那个版本**，不看那个目录里有没有 aidl。
+      # ------------------------------------------------------------------
+      - name: Verify Android SDK toolchain
+        run: |
+          set -o pipefail
+          SDK="$HOME/.buildozer/android/platform/android-sdk"
+
+          if [ ! -d "$SDK" ]; then
+            echo "::error::SDK 目录不存在：$SDK"
+            exit 1
+          fi
+
+          # buildozer 的 sdkmanager_path 属性写死了 $SDK/tools/bin/sdkmanager
+          # （旧版 cmdline-tools 解压出来的位置），新版会落在 cmdline-tools/latest/bin/，
+          # 两个都找一遍，找不到就明确报出来。
+          SDKMANAGER=""
+          for cand in "$SDK/tools/bin/sdkmanager" "$SDK/cmdline-tools/latest/bin/sdkmanager"; do
+            if [ -x "$cand" ]; then SDKMANAGER="$cand"; break; fi
+          done
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::找不到 sdkmanager。SDK 顶层内容如下："
+            ls -1 "$SDK" || true
+            exit 1
+          fi
+          echo "sdkmanager = $SDKMANAGER"
+
+          echo "===== 接受全部 SDK 许可证（幂等）====="
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          if [ -d "$SDK/licenses" ]; then
+            ls -1 "$SDK/licenses"
+          else
+            # 这里不硬失败：真正的判据是下面的 aidl 检查，而且 buildozer 自己的
+            # android.accept_sdk_license 也会用 pexpect 应答一次许可证提示。
+            echo "::warning::licenses 目录没生成，交给 buildozer 自己的 accept_sdk_license 处理"
+          fi
+
+          echo "===== build-tools ====="
+          ls -1 "$SDK/build-tools" 2>/dev/null || echo "(build-tools 目录不存在)"
+
+          HIGHEST="$(ls -1 "$SDK/build-tools" 2>/dev/null | sort -V | tail -1 || true)"
+          AIDL="$SDK/build-tools/$HIGHEST/aidl"
+
+          # 万一最新的 build-tools 里真的没有 aidl（历史上偶发），从别的版本借一个过来。
+          # 只在缺失时才跑，正常情况下完全不触发。
+          if [ -z "$HIGHEST" ] || [ ! -x "$AIDL" ]; then
+            echo "::warning::build-tools ${HIGHEST:-（无）} 下没有可执行的 aidl，尝试补一个"
+            yes | "$SDKMANAGER" --sdk_root="$SDK" "build-tools;35.0.0" > /dev/null 2>&1 || true
+            DONOR=""
+            for d in $(ls -1 "$SDK/build-tools" 2>/dev/null | sort -V -r || true); do
+              if [ -x "$SDK/build-tools/$d/aidl" ]; then DONOR="$d"; break; fi
+            done
+            if [ -n "$DONOR" ] && [ -n "$HIGHEST" ]; then
+              cp "$SDK/build-tools/$DONOR/aidl" "$AIDL"
+              chmod +x "$AIDL"
+              echo "已从 build-tools/$DONOR 复制 aidl 到 build-tools/$HIGHEST/"
+            fi
+          fi
+
+          if [ -z "$HIGHEST" ]; then
+            echo "::error::build-tools 目录里一个版本都没有 —— 说明 build-tools 包根本没装上。"
+            echo "::error::最可能的原因就是许可证没被接受，检查 buildozer.spec 里的"
+            echo "::error::android.accept_sdk_license 是否还是 True。"
+            ls -1 "$SDK" || true
+            exit 1
+          fi
+
+          if [ ! -x "$AIDL" ]; then
+            echo "::error::build-tools/$HIGHEST 下没有 aidl。注意 buildozer 的 _check_aidl()"
+            echo "::error::只看目录名最大的那个版本，放在别的版本里没用。"
+            ls -la "$SDK/build-tools/$HIGHEST" 2>/dev/null | head -30 || true
+            exit 1
+          fi
+
+          # buildozer 的判定是：无参数运行 aidl，返回码必须 == 1，否则报
+          # "Aidl cannot be executed"。这里原样验证一遍。
+          rc=0
+          "$AIDL" > /dev/null 2>&1 || rc=$?
+          echo "aidl            = $AIDL"
+          echo "aidl 无参数退出码 = $rc  （buildozer 要求 1）"
+          if [ "$rc" -ne 1 ]; then
+            echo "::warning::退出码不是 1，buildozer 可能报 'Aidl cannot be executed'"
+          fi
+
+          echo "===== 已安装的 SDK 组件 ====="
+          "$SDKMANAGER" --sdk_root="$SDK" --list 2>/dev/null \
+            | sed -n '/Installed packages/,/Available Packages/p' | head -40 || true
+
+      # 下完就存，不等构建结果。上面那一步已经把 licenses/ 写好了，会一起存进去。
       - name: Save buildozer cache
         if: steps.bz-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5

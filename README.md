@@ -77,6 +77,45 @@ buildozer 的版本和关键 python 包（cython、pexpect…）。**buildozer �
   刚下完的 1.5 GB SDK/NDK 就白下了。拆开之后可以在"下完 SDK、还没开始构建"
   时就先存下来。（`cache@v5` 的 `save-always` 已被官方标记"不按预期工作"，别用。）
 
+#### 报 `Aidl not found, please install it` / `license is not accepted`
+
+首次构建实际就是这么挂的（run #1，第 9 步只跑了 9 秒就退出）。完整日志长这样：
+
+```
+Accept? (y/N): Skipping following packages as the license is not accepted:
+Android SDK Build-Tools 37
+The following packages can not be installed since their licenses or those of
+the packages they depend on were not accepted:
+build-tools;37.0.0
+[=======================================] 100% Computing updates...
+# Check that aidl can be executed
+# build-tools folder not found .../android-sdk/build-tools
+# Search for Aidl
+# Aidl not found, please install it.
+```
+
+**这不是 aidl 缺失的问题，是上一行的"许可证没接受"导致的连锁反应**：许可证没接受
+→ `build-tools` 整个包被跳过安装 → 没有 `build-tools/` 目录 → 自然找不到里面的
+`aidl` → buildozer 在 `buildops.checkbin()` 里 `exit(1)`。
+
+根因在 `buildozer.spec` 里：`android.accept_sdk_license` 的**默认值是 `False`**
+（buildozer 自己的 `default.spec` 原话是 "If set to False, **the default**, you will
+be shown the license when first running buildozer"）。默认值下 buildozer 只是把
+sdkmanager 的输出丢到终端然后干等，CI 里没人能按 `y`，于是直接跳过。
+
+本仓库已经设成 `android.accept_sdk_license = True`，**不要删掉它**。置 True 后
+buildozer 会改用 pexpect（分配 pty）监听 `(y/N)` 提示并自动应答 `y` —— 见
+`targets/android.py` 的 `_android_update_sdk()`。
+
+workflow 里还额外加了一步 `Verify Android SDK toolchain` 兜底：无条件跑一次
+`yes | sdkmanager --licenses`（幂等），并**复刻 buildozer 的 aidl 判定逻辑**
+（取版本号最大的那个 build-tools 目录，无参数运行 aidl，返回码必须为 1）提前
+报错。之所以要复刻，是因为 buildozer 的 `_check_aidl()` 用的
+`_read_version_subdir()` 只看**目录名最大的那个版本**，不看里面有没有 aidl。
+
+好处是 `licenses/` 目录就在 `~/.buildozer` 里，会被缓存带走，所以这一次接受了
+之后，后续所有构建都不会再遇到许可证问题。
+
 ### 方式 B：桌面预览（调界面 / 改歌词解析时用）
 
 **要求 Python 3.8 ～ 3.13，不能用 3.14。** 先确认一下版本：

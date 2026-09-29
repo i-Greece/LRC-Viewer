@@ -55,6 +55,28 @@ android.archs = arm64-v8a
 
 android.allow_backup = True
 
+# --------------------------------------------------------------------------
+# 必须显式打开，否则云端构建一定失败（这不是可选项）
+# --------------------------------------------------------------------------
+#
+# buildozer 的 default.spec 里这一项的默认值是 **False**，原文：
+#     # (bool) If True, then automatically accept SDK license
+#     # agreements. This is intended for automation only. If set to False,
+#     # the default, you will be shown the license when first running
+#     # buildozer.
+#
+# 默认 False 的行为是：把 sdkmanager 的输出直接丢到终端，然后**干等** ——
+# 在 CI 里没人能按 y，于是这一段出现：
+#     Accept? (y/N): Skipping following packages as the license is not accepted:
+#     Android SDK Build-Tools 37
+#     ... build-tools folder not found ...
+#     Aidl not found, please install it.
+# 最终 buildozer 在 checkbin() 里直接 exit(1)，耗时 9 秒都不到。
+#
+# 设成 True 之后，buildozer 会走 buildops.cmd_expect()（pexpect 分配一个 pty），
+# 监听到 "(y/N)" 就自动 sendline("y")，见 targets/android.py 的 _android_update_sdk()。
+android.accept_sdk_license = True
+
 p4a.bootstrap = sdl2
 
 [buildozer]
