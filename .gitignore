@@ -1,0 +1,26 @@
+# buildozer 构建产物
+bin/
+.buildozer/
+.buildozer_global/
+
+# CI 会去下载字体，不入库（约 9 MB，没必要塞进 git 历史）
+fonts/*.otf
+fonts/*.ttf
+fonts/*.ttc
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 签名文件千万别提交
+*.jks
+*.keystore
+
+# 编辑器
+.vscode/
+.idea/
+
+# 工作笔记 / 智能体记忆，属于本地资料，不随代码公开
+.workbuddy/

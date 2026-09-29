@@ -1,0 +1,21 @@
+# 桌面上跑 main.py / run.py 调试界面，只需要 Kivy 一个包。
+#
+# ⚠️ 前提：Python 必须是 3.8 ~ 3.13，不能用 3.14。
+#
+# 原因（不是猜的，是查了 PyPI 的 wheel 清单）：
+#   Kivy 2.3.1 只发布了 cp38 / cp39 / cp310 / cp311 / cp312 / cp313 的
+#   Windows wheel，没有 cp314。所以在 3.14 上 pip 找不到 wheel，
+#   会退化成"下载源码包自己编译"，而 Kivy 源码包的 [build-system] 里有：
+#       kivy_deps.sdl2_dev~=0.8.0; sys_platform == "win32"
+#   这个包同样只到 cp313，于是报：
+#       ERROR: Could not find a version that satisfies the requirement
+#              kivy_deps.sdl2_dev~=0.8.0 (from versions: none)
+#
+#   顺带一提，同组的 gstreamer_dev / glew_dev / angle_dev 都有 cp314 wheel，
+#   只有 sdl2_dev 没有 —— 所以报错里只会出现 sdl2_dev 这一个名字。
+#
+# 换 Python 3.13（或 3.12）之后 `pip install -r requirements.txt`
+# 会直接命中预编译好的 cp313 wheel，秒装，不会碰源码编译。
+#
+# Android 打包用的 buildozer / pyjnius 不要写在这里 —— 它们只在构建环境里用。
+kivy>=2.3.1,<3

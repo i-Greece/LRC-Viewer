@@ -1,0 +1,100 @@
+<!--
+  本文件的开头刻意 **不写** <?xml ... ?> 声明。
+
+  原因：buildozer 把本文件的路径交给 p4a，p4a 再把文件内容原样内联到
+  AndroidManifest.xml 的 <activity> 内部。而 XML 声明只允许出现在文档最开头，
+  留在这里会让生成的 AndroidManifest.xml 解析失败（构建直接报错）。
+
+  这里只放"文件关联"过滤器。不要写 <filters> 之类的包裹标签。
+
+  两条硬约束（都是从 python-for-android 的 AndroidManifest.tmpl.xml 源码里确认的）：
+
+  1. p4a 已经在这个 <activity> 里无条件写死了
+         <intent-filter>
+           <action android:name="android.intent.action.MAIN"/>
+           <category android:name="android.intent.category.LAUNCHER"/>
+         </intent-filter>
+     本文件的内容是 **追加** 在它后面的。
+     >>> 所以这里绝对不要再写 MAIN/LAUNCHER，否则桌面会出现两个图标。 <<<
+
+  2. <activity> 的 android:exported="true" 也已经由 p4a 写好，不需要注入。
+
+  原理说明（为什么必须写成这个样子）：
+     Android 的文件关联只认 MIME 类型，**不认扩展名**。
+     .lrc 不在系统 MimeTypeMap 里，所以文件管理器解析出来的类型是
+     application/octet-stream，甚至干脆是 */*。
+     一个只声明了 text/plain 的文本阅读器，是永远不会出现在候选列表里的。
+     下面第 2 条过滤器就是解决这个问题的关键。
+-->
+
+<!-- ① 老式文件管理器：file:// URI + 明确的后缀匹配。
+     注意：pathPattern 只有在同时给出 scheme 和 host 时才生效，所以 host 必须是 *。
+     另外 Android 的 PatternMatcher 有个历史怪癖：".*\.lrc" 在路径中间含有其它
+     点号时会提前中断匹配，所以要再补一条 ".*\..*\.lrc"。 -->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="file" />
+    <data android:host="*" />
+    <data android:mimeType="*/*" />
+    <data android:pathPattern=".*\.lrc" />
+    <data android:pathPattern=".*\..*\.lrc" />
+    <data android:pathPattern=".*\.LRC" />
+    <data android:pathPattern=".*\..*\.LRC" />
+</intent-filter>
+
+<!-- ② 关键兜底：现代文件管理器（Android 7 以后一律用 content://）对未知扩展名
+     给出的类型就是 application/octet-stream。
+     没有这一条，本应用在绝大多数国产 ROM 的文件管理器里根本不会出现。 -->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="application/octet-stream" />
+</intent-filter>
+
+<!-- ③ 有些文件管理器（以及浏览器下载完成后）会把歌词识别成 text/plain。
+     多声明一条，覆盖这种更理想的情况。 -->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:scheme="content" />
+    <data android:scheme="file" />
+    <data android:mimeType="text/plain" />
+</intent-filter>
+
+<!-- ④ 自定义 MIME。只要有任何一方（第三方文件管理器、未来的系统版本、
+     某个播放器）把 .lrc 标成这些类型，本应用就能精准接住，不和其它 App 抢。
+     不写 scheme 时，默认就是 content + file。 -->
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+    <data android:mimeType="text/x-lrc" />
+    <data android:mimeType="application/x-lrc" />
+    <data android:mimeType="text/lrc" />
+    <data android:mimeType="application/lrc" />
+</intent-filter>
+
+<!--
+  ============================ 最后的杀手锏 ============================
+
+  如果装完之后，你的文件管理器里还是看不到本应用（个别 ROM 会把未知类型
+  的文件补成别的 MIME，或者干脆不带类型发出去），就把下面这段的注释去掉：
+
+  <intent-filter>
+      <action android:name="android.intent.action.VIEW" />
+      <category android:name="android.intent.category.DEFAULT" />
+      <category android:name="android.intent.category.BROWSABLE" />
+      <data android:scheme="content" />
+      <data android:scheme="file" />
+      <data android:mimeType="*/*" />
+  </intent-filter>
+
+  代价是：本应用会出现在"打开任何文件"的候选列表里（包括图片、视频、联系人…）。
+  能解决 100% 的关联问题，但会显得很吵。先用默认配置试，不行再启用。
+-->
