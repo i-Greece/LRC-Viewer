@@ -41,17 +41,42 @@ jobs:
             git zip unzip openjdk-17-jdk autoconf automake libtool \
             pkg-config zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev
 
+      # 只装 buildozer 本身，**不要**再顺手写一个 `pip install cython`。
+      # buildozer 自己的元数据里已经声明了 `cython<3.0`，再显式要一个"不限版本"
+      # 的 cython，只会让解析结果变得不确定（pip 有可能装上 p4a 用不了的 3.x）。
+      # 让 buildozer 的依赖声明去决定 Cython 版本。
       - name: Install buildozer
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          pip install buildozer cython
+          pip install --upgrade buildozer
 
-      # 第一次运行仍然要下 Android SDK / NDK（约 1.5 GB，40 分钟左右）；
-      # 有了这个缓存之后，后续构建通常 5~10 分钟。
-      # 改了 buildozer.spec 的 key 会重建缓存 —— 这是故意的，
-      # 因为 SDK/API 级别变了就必须重新拉工具链。
-      - name: Cache buildozer global directory
-        uses: actions/cache@v5
+      # buildozer 最典型的失败形态就是"秒退"，而工具链版本对不上是头号原因。
+      # 出问题时先看这一步的输出。
+      - name: Show toolchain versions
+        run: |
+          echo "===== 解释器 / 工具链 ====="
+          python -V
+          java -version 2>&1 | head -3
+          javac -version 2>&1
+          git --version
+          buildozer --version 2>&1 | head -2 || true
+          echo "===== 关键 python 包 ====="
+          pip list 2>/dev/null | grep -iE "^(buildozer|cython|pexpect|packaging|jinja2|colorama|appdirs) " || true
+          echo "===== 文件关联配置 ====="
+          ls -l android/intent_filters.xml || echo "::error::找不到 android/intent_filters.xml"
+
+      # 这里用 cache/restore + cache/save 两步，而不是单步 actions/cache。
+      #
+      # 原因：单步 actions/cache 的 post 步骤是 `post-if: success()` —— 也就是
+      # **整个 job 成功才存缓存**。那样一旦构建失败，刚下完的 1.5 GB SDK/NDK
+      # 就白下了，下次重跑还得再下一遍，反复失败会一直被这个成本惩罚。
+      # 拆开之后可以在"下完 SDK、构建还没开始"的时候就先存下来。
+      #
+      # 顺带记一笔：cache@v5 的 `save-always` 已经被官方标记为
+      # "does not work as intended and will be removed"，别用它。
+      - name: Restore buildozer cache
+        id: bz-cache
+        uses: actions/cache/restore@v5
         with:
           path: ~/.buildozer
           key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
@@ -71,15 +96,44 @@ jobs:
             || echo "::warning::字体下载失败，App 将退回使用系统字体"
           ls -lh fonts || true
 
-      # 先单独跑 update，把 SDK/NDK 灌进缓存。这样即使后面的构建失败，
-      # 下次重跑也能直接从缓存开始。
+      # 允许这一步失败（历史上 buildozer 对非致命情况也会返回非 0），
+      # 但**输出一定要落盘**。
+      # 之前这里写的是 `buildozer android update || true`，把错误整段吞掉了，
+      # 结果只在下一步看到"9 秒就挂"，根因完全没法排查。
       - name: Download Android SDK / NDK
-        run: buildozer android update || true
+        run: |
+          set -o pipefail
+          buildozer android update 2>&1 | tee -a "$RUNNER_TEMP/buildozer.log" \
+            || echo "::warning::buildozer android update 返回非 0，日志已记录，交给下一步暴露真正错误"
+
+      # 下完就存，不等构建结果。
+      - name: Save buildozer cache
+        if: steps.bz-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.buildozer
+          key: ${{ steps.bz-cache.outputs.cache-primary-key }}
 
       - name: Build debug APK
-        run: buildozer android debug
+        run: |
+          set -o pipefail
+          buildozer android debug 2>&1 | tee -a "$RUNNER_TEMP/buildozer.log"
         env:
           BUILDOZER_WARN_ON_ROOT: 0
+
+      # 失败时把日志末尾写进 job summary。
+      # summary 在 run 页面上是公开可见的，不用登录、也不用在一大堆折叠的日志
+      # 里翻找 —— 直接把 run 页面链接发出去，对方就能看到失败原因。
+      - name: Surface build log on failure
+        if: failure()
+        run: |
+          {
+            echo "## buildozer 日志末尾 200 行"
+            echo '```text'
+            tail -n 200 "$RUNNER_TEMP/buildozer.log" 2>/dev/null \
+              || echo "(没有生成日志文件)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK
         uses: actions/upload-artifact@v7

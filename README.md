@@ -57,6 +57,26 @@ Android SDK / NDK**，APK 在 GitHub Actions 上编译。
 > 要上架请把 workflow 里的 `buildozer android debug` 换成
 > `buildozer android release`，并在 `buildozer.spec` 里配好 keystore。
 
+#### 构建失败了怎么排查
+
+**先看 run 页面上的 Summary 区域** —— workflow 在失败时会把 `buildozer` 日志的
+最后 200 行自动写进那里（`Surface build log on failure` 这一步），不用在折叠的
+日志里一步步翻。
+
+还有个 `Show toolchain versions` 步骤，会打印 Python / java / javac / git /
+buildozer 的版本和关键 python 包（cython、pexpect…）。**buildozer 最典型的失败
+形态就是"秒退"，而工具链版本对不上是头号原因**，先看这个输出往往就能定位。
+
+两个刻意为之的设计，别改回去：
+
+- `buildozer android update` **不写成 `|| true`**。它允许失败（历史上对非致命
+  情况也会返回非 0），但输出会 `tee` 到日志文件里。写成 `|| true` 会把错误整段
+  吞掉，结果只看到下一步莫名其妙地 9 秒就挂，根因完全查不到。
+- 缓存拆成 `cache/restore` + `cache/save` 两步。单步 `actions/cache` 的 post
+  步骤是 `post-if: success()`，**整个 job 成功才存缓存** —— 那样构建一失败，
+  刚下完的 1.5 GB SDK/NDK 就白下了。拆开之后可以在"下完 SDK、还没开始构建"
+  时就先存下来。（`cache@v5` 的 `save-always` 已被官方标记"不按预期工作"，别用。）
+
 ### 方式 B：桌面预览（调界面 / 改歌词解析时用）
 
 **要求 Python 3.8 ～ 3.13，不能用 3.14。** 先确认一下版本：
